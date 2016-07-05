@@ -4,30 +4,31 @@ import httplib
 import logging
 import json
 import urlparse
-
 import boto.s3 as s3
 
 import s3etag
+import common
 
-FORMAT = '%(asctime)-15s %(levelname)s: %(message)s'
-logging.basicConfig(format=FORMAT)
 logger = logging.getLogger('httpxml_to_s3')
-logger.setLevel(logging.INFO)
-
 
 def httpxml_to_s3(http_url,
                   s3_url,
                   region='eu-west-1',
                   profile_name=None,
                   xml_preprocessor=lambda s: s):
+    def inner(fn_inner):
+        return sync_to_bucket(s3_url, region, profile_name)(from_xml(http_url)(fn_inner))
+    return inner;
+
+def sync_to_bucket(s3_url,
+                   region='eu-west-1',
+                   profile_name=None):
     """
     Decorator function configuring function
     xml_preprocessor - If some preprocessing needs to be done on the xml as
                        a string a lambda can be sent in. Defaults to the
                        identity function
     """
-
-    parsed_url = urlparse.urlparse(http_url)
 
     parsed_s3_url = urlparse.urlparse(s3_url);
 
@@ -37,21 +38,6 @@ def httpxml_to_s3(http_url,
         key_prefix = key_prefix[1:]
     if key_prefix[-1] != '/':
         key_prefix = key_prefix + '/'
-
-
-    def get_page():
-        logger.info("Syncing feed on %s",
-                    http_url)
-        if parsed_url.scheme == 'https':
-            conn = httplib.HTTPSConnection(parsed_url.hostname, parsed_url.port)
-        elif parsed_url.scheme == 'http':
-            conn = httplib.HTTPConnection(parsed_url.hostname, parsed_url.port)
-        conn.request('GET', parsed_url.path);
-        resp = conn.getresponse()
-        response_string = xml_preprocessor(resp.read())
-        resp.close()
-        conn.close()
-        return ET.fromstring(response_string)
 
     def inner(fn_inner):
         """
@@ -71,9 +57,8 @@ def httpxml_to_s3(http_url,
             remaining_keys = { key.name : True for key in bucket.list(prefix=key_prefix)}
 
             logger.debug("Existing keys in bucket\n%s", '\n'.join(remaining_keys));
-            input_xml = get_page()
 
-            for id, json_data in fn_inner(input_xml):
+            for id, json_data in fn_inner():
                 key_name = key_prefix + str(uuid.uuid5(uuid.NAMESPACE_URL, id.encode('utf-8')))
 
                 # Key found, delete it from cleanup map
@@ -107,3 +92,11 @@ def httpxml_to_s3(http_url,
 
     return inner
 
+
+def from_xml(url):
+    def inner(fn_inner):
+        def handler():
+            input_xml = ET.fromstring(common.get_page(url))
+            return fn_inner(input_xml)
+        return handler
+    return inner
